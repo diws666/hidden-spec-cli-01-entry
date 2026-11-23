@@ -40,6 +40,10 @@ function safe(p: string): boolean {
   return p !== '' && !p.startsWith('/') && !p.includes('\\') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
 }
 
+
+function isDir(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
 /* ---------------- section 5: tiered line matching ---------------- */
 
 function normTrail(s: string): string { return s.replace(/[ \t]+$/, ''); }
@@ -162,7 +166,7 @@ function jsonEdit(v: unknown): Edit | null {
     const text = o.file_text;
     return (tree) => {
       if (!safe(p)) throw new Fail('unsafe', p);
-      if (tree.get(p) !== null) throw new Fail('exists', p);
+      if (tree.get(p) !== null || isDir(p)) throw new Fail('exists', p);
       tree.now.set(p, text);
     };
   }
@@ -265,6 +269,7 @@ function stripAB(p: string): string {
 function readUHeader(lines: string[], i: number, n: number, sec: USec): { i: number; hunkStarted: boolean } {
   while (i < n) {
     const l = lines[i];
+    if (l.startsWith('diff --git ')) return { i, hunkStarted: false };
     if (l.startsWith('@@')) {
       const m = HUNK_HEADER.exec(l);
       if (m) return { i, hunkStarted: true };
@@ -315,13 +320,14 @@ function parseUHunk(lines: string[], i: number, n: number): { hunk: UHunk; newI:
     if (l.startsWith('diff --git ') || (l.startsWith('--- ') && (lines[j + 1] ?? '').startsWith('+++ '))) break;
     if (l.startsWith('\\')) {
       backslashLast = lastWasContent;
+      lastWasContent = false;
       j++;
       continue;
     }
-    if (l.startsWith(' ')) { body.push({ type: 'ctx', text: l.slice(1) }); lastWasContent = true; j++; continue; }
-    if (l.startsWith('-')) { body.push({ type: 'old', text: l.slice(1) }); lastWasContent = true; j++; continue; }
-    if (l.startsWith('+')) { body.push({ type: 'new', text: l.slice(1) }); lastWasContent = true; j++; continue; }
-    if (l === '') { body.push({ type: 'ctx', text: '' }); lastWasContent = true; j++; continue; }
+    if (l.startsWith(' ')) { body.push({ type: 'ctx', text: l.slice(1) }); lastWasContent = true; backslashLast = false; j++; continue; }
+    if (l.startsWith('-')) { body.push({ type: 'old', text: l.slice(1) }); lastWasContent = true; backslashLast = false; j++; continue; }
+    if (l.startsWith('+')) { body.push({ type: 'new', text: l.slice(1) }); lastWasContent = true; backslashLast = false; j++; continue; }
+    if (l === '') { body.push({ type: 'ctx', text: '' }); lastWasContent = true; backslashLast = false; j++; continue; }
     break;
   }
   // empty lines at the end of a body are not part of it
@@ -385,7 +391,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
       const paths = kind === 'move' ? [target!, moveTarget!] : [target!];
       for (const pp of paths) if (!safe(pp)) throw new Fail('unsafe', pp);
       if (kind === 'create') {
-        if (tree.get(target!) !== null) throw new Fail('exists', target!);
+        if (tree.get(target!) !== null || isDir(target!)) throw new Fail('exists', target!);
         const plus: string[] = [];
         for (const h of sec.hunks) for (const op of h.ops) if (op.type === 'new') plus.push(op.text);
         const backslash = sec.hunks.length > 0 && sec.hunks[sec.hunks.length - 1]!.backslashLast;
@@ -400,7 +406,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
       }
       const before = tree.get(target!);
       if (before === null) throw new Fail('missing', target!);
-      if (moveTarget !== null && tree.get(moveTarget!) !== null) throw new Fail('exists', moveTarget!);
+      if (moveTarget !== null && (tree.get(moveTarget!) !== null || isDir(moveTarget!))) throw new Fail('exists', moveTarget!);
       const rep = splitFile(before);
       let cur = [...rep.lines];
       let curFinal = rep.final;
@@ -487,7 +493,7 @@ function searchReplaceEdits(text: string, lines: string[], strict: boolean): Edi
       edits.push((tree) => {
         if (!safe(path)) throw new Fail('unsafe', path);
         if (oldLines.length === 0) {
-          if (tree.get(path) !== null) throw new Fail('exists', path);
+          if (tree.get(path) !== null || isDir(path)) throw new Fail('exists', path);
           tree.now.set(path, joinFile(newLines, '\n', true));
           return;
         }
@@ -574,7 +580,7 @@ function v4aEdits(text: string, lines: string[], strict: boolean, moves: { old: 
       }
       edits.push((tree) => {
         if (!safe(path)) throw new Fail('unsafe', path);
-        if (tree.get(path) !== null) throw new Fail('exists', path);
+        if (tree.get(path) !== null || isDir(path)) throw new Fail('exists', path);
         tree.now.set(path, joinFile(secLines, '\n', true));
       });
     } else if (l.startsWith('*** Delete File: ')) {
@@ -609,7 +615,7 @@ function v4aEdits(text: string, lines: string[], strict: boolean, moves: { old: 
         if (cl === '*** End Patch') break;
         if (cl.startsWith('*** Add File: ') || cl.startsWith('*** Delete File: ') || cl.startsWith('*** Update File: ')) break;
         if (cl.startsWith('@@ ')) {
-          const anchor = cl.slice(3).trim();
+          const anchor = (cl.slice(3).trim() || null);
           i++;
           const b = collectV4aBody(lines, i, n);
           i = b.newI;
@@ -630,7 +636,7 @@ function v4aEdits(text: string, lines: string[], strict: boolean, moves: { old: 
         if (movePath !== null && !safe(movePath)) throw new Fail('unsafe', movePath);
         const before = tree.get(path);
         if (before === null) throw new Fail('missing', path);
-        if (movePath !== null && tree.get(movePath!) !== null) throw new Fail('exists', movePath!);
+        if (movePath !== null && (tree.get(movePath!) !== null || isDir(movePath!))) throw new Fail('exists', movePath!);
         const rep = splitFile(before);
         let cur = [...rep.lines];
         let cursor = 0;
