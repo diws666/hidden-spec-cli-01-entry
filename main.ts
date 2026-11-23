@@ -243,10 +243,13 @@ interface UHunk { A: number; ops: UOp[]; backslashLast: boolean; }
 interface USec {
   oldPath: string | null;
   newPath: string | null;
+  explicit: boolean;   // true when a ---/+++ pair named the paths
   createMode: boolean;
   delMode: boolean;
   hunks: UHunk[];
 }
+
+const HUNK_HEADER = /^@@ -(\d+)(,(\d+))? \+(\d+)(,(\d+))? @@/;
 
 function parsePath(s: string): string {
   const tab = s.indexOf('\t');
@@ -262,14 +265,17 @@ function stripAB(p: string): string {
 function readUHeader(lines: string[], i: number, n: number, sec: USec): { i: number; hunkStarted: boolean } {
   while (i < n) {
     const l = lines[i];
-    if (l.startsWith('@@ ')) {
-      return { i, hunkStarted: true };
+    if (l.startsWith('@@')) {
+      const m = HUNK_HEADER.exec(l);
+      if (m) return { i, hunkStarted: true };
+      throw new Exit2(`error: parse ${i + 1}`);
     }
     if (l.startsWith('--- ')) {
       const nxt = lines[i + 1] ?? '';
       if (nxt.startsWith('+++ ')) {
         sec.oldPath = stripAB(parsePath(l.slice(4)));
         sec.newPath = stripAB(parsePath(nxt.slice(4)));
+        sec.explicit = true;
         i += 2;
         continue;
       }
@@ -280,12 +286,12 @@ function readUHeader(lines: string[], i: number, n: number, sec: USec): { i: num
       continue;
     }
     if (l.startsWith('rename from ')) {
-      sec.oldPath = l.slice('rename from '.length).trim();
+      if (!sec.explicit) sec.oldPath = l.slice('rename from '.length).trim();
       i++;
       continue;
     }
     if (l.startsWith('rename to ')) {
-      sec.newPath = l.slice('rename to '.length).trim();
+      if (!sec.explicit) sec.newPath = l.slice('rename to '.length).trim();
       i++;
       continue;
     }
@@ -335,7 +341,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
       if (parts.length < 2 || !parts[0]!.startsWith('a/') || !parts[1]!.startsWith('b/')) {
         throw new Exit2(`error: parse ${i + 1}`);
       }
-      const sec: USec = { oldPath: stripAB(parts[0]!), newPath: stripAB(parts[1]!), createMode: false, delMode: false, hunks: [] };
+      const sec: USec = { oldPath: stripAB(parts[0]!), newPath: stripAB(parts[1]!), explicit: false, createMode: false, delMode: false, hunks: [] };
       secs.push(sec);
       i++;
       const r = readUHeader(lines, i, n, sec);
@@ -346,7 +352,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
         i = h.newI;
       }
     } else if (l.startsWith('--- ') && (lines[i + 1] ?? '').startsWith('+++ ')) {
-      const sec: USec = { oldPath: stripAB(parsePath(l.slice(4))), newPath: stripAB(parsePath(lines[i + 1]!.slice(4))), createMode: false, delMode: false, hunks: [] };
+      const sec: USec = { oldPath: stripAB(parsePath(l.slice(4))), newPath: stripAB(parsePath(lines[i + 1]!.slice(4))), explicit: true, createMode: false, delMode: false, hunks: [] };
       secs.push(sec);
       i += 2;
       const r = readUHeader(lines, i, n, sec);
@@ -356,7 +362,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
         sec.hunks.push(h.hunk);
         i = h.newI;
       }
-    } else if (l.startsWith('@@ ') && secs.length === 0) {
+    } else if (l.startsWith('@@')) {
       throw new Exit2(`error: parse ${i + 1}`);
     } else {
       i++;
@@ -394,6 +400,7 @@ function unifiedEdits(text: string, lines: string[], strict: boolean, moves: { o
       }
       const before = tree.get(target!);
       if (before === null) throw new Fail('missing', target!);
+      if (moveTarget !== null && tree.get(moveTarget!) !== null) throw new Fail('exists', moveTarget!);
       const rep = splitFile(before);
       let cur = [...rep.lines];
       let curFinal = rep.final;
@@ -623,6 +630,7 @@ function v4aEdits(text: string, lines: string[], strict: boolean, moves: { old: 
         if (movePath !== null && !safe(movePath)) throw new Fail('unsafe', movePath);
         const before = tree.get(path);
         if (before === null) throw new Fail('missing', path);
+        if (movePath !== null && tree.get(movePath!) !== null) throw new Fail('exists', movePath!);
         const rep = splitFile(before);
         let cur = [...rep.lines];
         let cursor = 0;
